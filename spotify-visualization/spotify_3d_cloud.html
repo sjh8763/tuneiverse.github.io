@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive 3D Song Cloud</title>
+    <!-- Tailwind CSS for styling the info panel -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Basic reset and full-screen canvas container */
+        body {
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #000;
+            color: #fff;
+            overflow: hidden; /* Prevents scrollbars */
+        }
+        #container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            cursor: grab;
+        }
+        #container:active {
+            cursor: grabbing;
+        }
+        /* Styling for the info panel */
+        #info-panel {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 100;
+            display: none; /* Hidden by default */
+        }
+    </style>
+</head>
+<body>
+
+    <!-- This div will hold the 3D canvas -->
+    <div id="container"></div>
+
+    <!-- Info panel to show song details (hidden by default) -->
+    <div id="info-panel" class="w-11/12 max-w-md p-6 bg-gray-900 bg-opacity-90 backdrop-blur-md rounded-lg shadow-2xl border border-gray-700">
+        <div class="flex justify-between items-center mb-4">
+            <h2 id="panel-title" class="text-2xl font-bold text-white">Song Cluster</h2>
+            <button id="close-panel" class="text-gray-400 hover:text-white text-2xl">&times;</button>
+        </div>
+        <div class="text-gray-300">
+            <p class="mb-2"><strong class="text-white">Genre:</strong> <span id="panel-genre"></span></p>
+            <p class="mb-4"><strong class="text-white">Year:</strong> <span id="panel-year"></span></p>
+            <h3 class="text-lg font-semibold text-white mb-2">Related Songs:</h3>
+            <ul id="panel-song-list" class="list-disc list-inside h-40 overflow-y-auto bg-gray-800 p-3 rounded-md">
+                <!-- Song items will be injected here -->
+            </ul>
+        </div>
+    </div>
+    
+    <!-- App overlay text -->
+    <div class="fixed top-5 left-5 text-white p-4 rounded-lg bg-black bg-opacity-50">
+        <h1 class="text-2xl font-bold">3D Song Cloud</h1>
+        <p class="text-sm text-gray-300">Click a particle to see details</p>
+    </div>
+
+    <!-- Three.js library -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <!-- Main application logic -->
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        let scene, camera, renderer, controls;
+        let particles; // This will be our THREE.Points object
+        let mockData = []; // This will store our data { position, data }
+
+        // Raycasting for interactivity
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        // DOM Elements
+        const container = document.getElementById('container');
+        const infoPanel = document.getElementById('info-panel');
+        const closePanelBtn = document.getElementById('close-panel');
+        const panelGenre = document.getElementById('panel-genre');
+        const panelYear = document.getElementById('panel-year');
+        const panelSongList = document.getElementById('panel-song-list');
+
+        // --- 1. SPOTIFY DATA FETCHING (NEW) ---
+
+        /**
+         * This new function replaces the simple mock data generator.
+         * It shows the flow of fetching data from the Spotify API.
+         */
+        async function getSpotifyData() {
+            // This is the REAL URL for your local backend server.
+            const YOUR_BACKEND_TOKEN_URL = 'http://localhost:3000/api/get-spotify-token';
+            
+            // This is a real Spotify API endpoint.
+            // We'll search for 50 tracks across these genres.
+            const SPOTIFY_SEARCH_URL = 'https://api.spotify.com/v1/search?q=genre%3Arock%2Cpop%2Chip-hop%2Celectronic&type=track&limit=50';
+
+            try {
+                // --- Step 1: Get Access Token from our backend ---
+                console.log("Attempting to fetch Spotify token from backend...", YOUR_BACKEND_TOKEN_URL);
+                const tokenResponse = await fetch(YOUR_BACKEND_TOKEN_URL);
+                if (!tokenResponse.ok) {
+                    throw new Error(`Backend token server responded with ${tokenResponse.status}. (Is server.js running?)`);
+                }
+                
+                const tokenData = await tokenResponse.json();
+                const accessToken = tokenData.access_token;
+                console.log("Successfully fetched token from backend.");
+
+                // --- Step 2: Fetch data from Spotify API ---
+                console.log("Fetching data from real Spotify API...");
+                const spotifyResponse = await fetch(SPOTIFY_SEARCH_URL, {
+                    headers: {
+                        'Authorization': `Bearer ${accessToken}`
+                    }
+                });
+
+                if (!spotifyResponse.ok) {
+                    throw new Error(`Spotify API request failed: ${spotifyResponse.status}`);
+                }
+                
+                const spotifyData = await spotifyResponse.json();
+                console.log("Successfully fetched data from Spotify:", spotifyData);
+
+                // --- Step 3: Process real data ---
+                // We'll convert the Spotify data into the format our visualization needs
+                const processedData = spotifyData.tracks.items.map(track => {
+                    // Try to get genre from the artist (this is often empty)
+                    // In a real app, you might need a separate API call to get artist genres
+                    const genre = track.artists[0]?.genres?.[0] || 'Pop'; // Default to Pop if unknown
+                    const year = new Date(track.album.release_date).getFullYear() || 2000;
+                    
+                    return {
+                        position: new THREE.Vector3(
+                            (Math.random() - 0.5) * 50, // We still randomize position for a cloud
+                            (Math.random() - 0.5) * 50,
+                            (Math.random() - 0.5) * 50
+                        ),
+                        color: genreColors[genre] || new THREE.Color(0xffffff), // Use white as fallback
+                        data: {
+                            genre: genre,
+                            year: year,
+                            songs: [`${track.name} by ${track.artists[0].name}`, `Album: ${track.album.name}`]
+                        }
+                    };
+                });
+                
+                // If we got fewer results than we want, fill with mock data
+                const totalParticles = 2000;
+                if (processedData.length < totalParticles) {
+                    const mock = generateMockData(totalParticles - processedData.length);
+                    processedData.push(...mock);
+                }
+                
+                return processedData;
+
+            } catch (error) {
+                // --- FALLBACK ---
+                console.warn(`API fetch failed: ${error.message}. Using mock data instead.`);
+                return generateMockData(2000);
+            }
+        }
+        
+        // --- 1b. MOCK DATA GENERATION (FALLBACK) ---
+        
+        const genres = ['Pop', 'Rock', 'Hip Hop', 'Electronic', 'Classical', 'Jazz'];
+        const genreColors = {
+            'Pop': new THREE.Color(0x00aaff),       // Blue
+            'Rock': new THREE.Color(0xff4400),      // Red
+            'Hip Hop': new THREE.Color(0.8, 0.7, 0.2), // Yellow/Gold
+            'Electronic': new THREE.Color(0x00ffaa), // Teal
+            'Classical': new THREE.Color(0.9, 0.9, 0.9), // White
+            'Jazz': new THREE.Color(0.8, 0.0, 0.8)  // Purple
+        };
+
+        function generateMockData(count) {
+            const data = [];
+            for (let i = 0; i < count; i++) {
+                const genre = genres[Math.floor(Math.random() * genres.length)];
+                const year = 1980 + Math.floor(Math.random() * 45); // 1980 - 2024
+                
+                const center = new THREE.Vector3(
+                    (Math.random() - 0.5) * 50,
+                    (Math.random() - 0.5) * 50,
+                    (Math.random() - 0.5) * 50
+                );
+                
+                const position = new THREE.Vector3(
+                    center.x + (Math.random() - 0.5) * 10,
+                    center.y + (Math.random() - 0.5) * 10,
+                    center.z + (Math.random() - 0.5) * 10
+                );
+
+                const songs = [
+                    `${genre} Song #${Math.floor(Math.random() * 100)}`,
+                    `${genre} Track ${Math.floor(Math.random() * 100)}`,
+                    `Music Hit (${year})`
+                ];
+
+                data.push({
+                    position: position,
+                    color: genreColors[genre],
+                    data: {
+                        genre: genre,
+                        year: year,
+                        songs: songs
+                    }
+                });
+            }
+            return data;
+        }
+
+
+        // --- 2. THREE.JS INITIALIZATION ---
+        
+        // Make init() 'async' so we can 'await' the data
+        async function init() {
+            // Scene
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x000000, 0.008); // Add fog for depth
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 70; // Start further back
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            container.appendChild(renderer.domElement);
+
+            // Controls
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true; // Smooth motion
+            controls.dampingFactor = 0.05;
+            controls.minDistance = 10;
+            controls.maxDistance = 200;
+
+            // --- 3. CREATE PARTICLES ---
+
+            console.log("Loading song data...");
+            
+            mockData = await getSpotifyData(); 
+            
+            console.log("Data loaded, creating particles...");
+
+            const geometry = new THREE.BufferGeometry();
+            const positions = [];
+            const colors = [];
+
+            mockData.forEach(item => {
+                positions.push(item.position.x, item.position.y, item.position.z);
+                colors.push(item.color.r, item.color.g, item.color.b);
+            });
+
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+            
+            // Texture for particles (a soft dot)
+            const canvas = document.createElement('canvas');
+            canvas.width = 64;
+            canvas.height = 64;
+            const context = canvas.getContext('2d');
+            const gradient = context.createRadialGradient(32, 32, 0, 32, 32, 32);
+            gradient.addColorStop(0, 'rgba(255,255,255,1)');
+            gradient.addColorStop(0.2, 'rgba(255,255,255,0.8)');
+            gradient.addColorStop(1, 'rgba(255,255,255,0)');
+            context.fillStyle = gradient;
+            context.fillRect(0, 0, 64, 64);
+            const softDotTexture = new THREE.CanvasTexture(canvas);
+
+            const material = new THREE.PointsMaterial({
+                size: 1.0,
+                map: softDotTexture,
+                vertexColors: true, // Use the colors we assigned
+                transparent: true,
+                blending: THREE.AdditiveBlending, // Gives a nice glow effect
+                depthWrite: false // Helps with transparency layering
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+
+            // --- 4. EVENT LISTENERS ---
+            window.addEventListener('resize', onWindowResize);
+            container.addEventListener('mousedown', onMouseDown);
+            closePanelBtn.addEventListener('click', hideInfoPanel);
+        }
+
+        // --- 5. ANIMATION LOOP ---
+        
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Add a check in case particles haven't loaded yet
+            if (!particles) return;
+            
+            // Gently rotate the cloud
+            if (particles) {
+                particles.rotation.y += 0.0002;
+                particles.rotation.x += 0.0001;
+            }
+
+            controls.update(); // Only needed if enableDamping is true
+            renderer.render(scene, camera);
+        }
+
+        // --- 6. HELPER FUNCTIONS ---
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function onMouseDown(event) {
+            // Check if the click was on the panel
+            if (infoPanel.style.display === 'block' && infoPanel.contains(event.target)) {
+                return;
+            }
+
+            event.preventDefault();
+
+            // Calculate mouse position in normalized device coordinates
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            // Update the raycaster
+            raycaster.setFromCamera(mouse, camera);
+            
+            // We need to set a threshold for the raycaster when using points
+            raycaster.params.Points.threshold = 0.5; // Adjust this value based on particle size
+
+            // Find intersections
+            const intersects = raycaster.intersectObject(particles);
+
+            if (intersects.length > 0) {
+                // Get the index of the intersected particle
+                const index = intersects[0].index;
+                
+                // Retrieve the data for that particle
+                const particleData = mockData[index].data;
+                
+                // Display the data
+                showInfoPanel(particleData);
+            }
+        }
+
+        function showInfoPanel(data) {
+            panelGenre.textContent = data.genre;
+            panelYear.textContent = data.year;
+
+            // Clear old song list
+            panelSongList.innerHTML = '';
+
+            // Populate new song list
+            data.songs.forEach(song => {
+                const li = document.createElement('li');
+                li.textContent = song;
+                li.className = "mb-1";
+                panelSongList.appendChild(li);
+            });
+
+            infoPanel.style.display = 'block';
+        }
+
+        function hideInfoPanel() {
+            infoPanel.style.display = 'none';
+        }
+
+        // --- START ---
+        // init() is now async, but we can just call it like normal
+        init();
+        animate();
+
+    </script>
+</body>
+</html>
+
+
+

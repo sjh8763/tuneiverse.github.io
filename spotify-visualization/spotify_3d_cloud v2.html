@@ -1,0 +1,880 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive 3D Song Cloud</title>
+    
+    <!-- Tailwind CSS (via CDN) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Basic reset and full-screen canvas container */
+        body {
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #000;
+            color: #fff;
+            overflow: hidden; /* Prevents scrollbars */
+            cursor: none;
+        }
+        #container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        /* --- Custom Cursor --- */
+        #custom-cursor {
+            position: fixed;
+            width: 30px;
+            height: 30px;
+            border: 2px solid white;
+            border-radius: 50%;
+            pointer-events: none; 
+            left: 0;
+            top: 0;
+            transform: translate(-15px, -15px);
+            transition: width 0.1s ease, height 0.1s ease, transform 0.1s ease;
+            z-index: 9999;
+        }
+        #custom-cursor.clicked {
+            width: 20px;
+            height: 20px;
+            transform: translate(-10px, -10px);
+        }
+
+        /* Styling for the info panel (BOTTOM) */
+        #info-panel {
+            position: fixed;
+            bottom: 0; 
+            left: 0; 
+            width: 100%; 
+            z-index: 100;
+            display: none; /* Hidden by default */
+        }
+
+        /* Filter Dropdown Styles */
+        .filter-select {
+            min-width: 120px;
+            background-color: #1f2937; /* bg-gray-800 */
+            color: #d1d5db; /* text-gray-300 */
+            border: 1px solid #4b5563; /* border-gray-600 */
+            border-radius: 0.375rem; /* rounded-md */
+            padding: 0.5rem 0.75rem;
+            font-size: 0.875rem; /* text-sm */
+        }
+        
+        /* --- Restore default cursor on UI elements --- */
+        #info-panel, #info-panel *, 
+        .filter-select, 
+        .fixed.top-5.left-5, .fixed.top-5.left-5 * {
+            cursor: auto;
+        }
+        .filter-select {
+            cursor: pointer;
+        }
+
+    </style>
+</head>
+<body>
+
+    <!-- Three.js Canvas Container -->
+    <div id="container"></div>
+
+    <!-- Custom Cursor element -->
+    <div id="custom-cursor"></div>
+
+    <!-- NEW: Hidden audio player for Deezer previews -->
+    <audio id="song-preview-player" preload="auto"></audio>
+
+    <!-- Info Panel (Bottom of screen) -->
+    <div id="info-panel" class="w-full p-6 bg-gray-900 bg-opacity-90 backdrop-blur-md rounded-t-lg shadow-2xl border-t border-x border-gray-700">
+        <!-- Content wrapper -->
+        <div class="max-w-4xl mx-auto">
+            <div class="flex justify-between items-center mb-4">
+                <h2 id="panel-title" class="text-2xl font-bold text-white truncate pr-4">Song Cluster</h2>
+                <button id="close-panel" class="text-gray-400 hover:text-white text-2xl flex-shrink-0">&times;</button>
+            </div>
+            
+            <div class="text-gray-300">
+                <p class="mb-2"><span id="panel-album-info" class="text-gray-400"></span></p>
+                <p class="mb-2"><strong class="text-white">Genre:</strong> <span id="panel-genre"></span></p>
+                <p class="mb-4"><strong class="text-white">Year:</strong> <span id="panel-year"></span></p>
+            </div>
+        </div>
+    </div>
+    
+    <!-- App overlay text & filters -->
+    <div class="fixed top-5 left-5 text-white p-4 rounded-lg bg-black bg-opacity-50 z-10">
+        <h1 class="text-2xl font-bold">3D Song Cloud</h1>
+        <p class="text-sm text-gray-300 mb-4">Click a particle to see details</p>
+        
+        <!-- Filter UI -->
+        <div class="flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:space-x-4">
+            <div>
+                <label for="genre-filter" class="block text-sm font-medium text-gray-300 mb-1">Genre</label>
+                <select id="genre-filter" name="genre-filter" class="filter-select">
+                    <option value="all">Loading...</option>
+                </select>
+            </div>
+            <div>
+                <label for="year-filter" class="block text-sm font-medium text-gray-300 mb-1">Year</label>
+                <select id="year-filter" name="year-filter" class="filter-select">
+                    <option value="all">Loading...</option>
+                </select>
+            </div>
+        </div>
+    </div>
+
+    <!-- 
+      Import map for Three.js
+      We are using cdn.jsdelivr.net as a stable CDN.
+    -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <!-- Main Application Logic -->
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        let scene, camera, renderer, controls;
+        let particles; // This will be our THREE.Points object
+        let mockData = []; // This will store our data { position, data, color }
+
+        // Glow and Line variables
+        let connectionLines; // THREE.LineSegments for related songs
+        let glowSprite; // THREE.Sprite for the selected particle
+        let selectedParticleIndex = -1; // Keep track of which particle is selected
+
+        // Audio
+        let audioContext; // For the "chime" fallback
+        let audioPlayer; // NEW: For the Deezer preview
+
+        // Filter elements
+        let genreFilter, yearFilter;
+
+        // Raycasting for interactivity
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        // Sphere Radius
+        const SPHERE_RADIUS = 25;
+
+        // --- Custom Cursor variables ---
+        let mouseX = 0;
+        let mouseY = 0;
+        let cursorX = 0;
+        let cursorY = 0;
+        const smoothingFactor = 0.2; // Controls the delay (0.2 = 20% movement per frame)
+
+        // DOM Elements
+        const container = document.getElementById('container');
+        const infoPanel = document.getElementById('info-panel');
+        const closePanelBtn = document.getElementById('close-panel');
+        const panelTitle = document.getElementById('panel-title'); 
+        const panelAlbumInfo = document.getElementById('panel-album-info'); 
+        const panelGenre = document.getElementById('panel-genre');
+        const panelYear = document.getElementById('panel-year');
+        const customCursor = document.getElementById('custom-cursor');
+        const filterBox = document.querySelector('.fixed.top-5.left-5');
+        
+        // --- 1. SPOTIFY/DEEZER DATA FETCHING ---
+        const genres = ['Pop', 'Rock', 'Hip Hop', 'Electronic', 'Classical', 'Jazz'];
+        const genreColors = {
+            'Pop': new THREE.Color(0x00aaff),       // Blue
+            'Rock': new THREE.Color(0xff4400),      // Red
+            'Hip Hop': new THREE.Color(0.8, 0.7, 0.2), // Yellow/Gold
+            'Electronic': new THREE.Color(0x00ffaa), // Teal
+            'Classical': new THREE.Color(0.9, 0.9, 0.9), // White
+            'Jazz': new THREE.Color(0.8, 0.0, 0.8)  // Purple
+        };
+
+        const genreNotes = {
+            'Pop': 1046.50,     // C6
+            'Rock': 1174.66,    // D6
+            'Hip Hop': 1318.51, // E6
+            'Electronic': 1396.91, // F6
+            'Classical': 1567.98, // G6
+            'Jazz': 1760.00     // A6
+        };
+
+        function getRandomPointInSphere(radius) {
+            const theta = Math.random() * 2 * Math.PI;
+            const phi = Math.acos(2 * Math.random() - 1);
+            const r = radius * Math.cbrt(Math.random());
+
+            const x = r * Math.sin(phi) * Math.cos(theta);
+            const y = r * Math.sin(phi) * Math.sin(theta);
+            const z = r * Math.cos(phi);
+
+            return new THREE.Vector3(x, y, z);
+        }
+
+        // --- NEW: Deezer API Fetcher ---
+        /**
+         * Fetches a 30-second preview URL from the Deezer API.
+         * @param {string} trackName - The name of the track.
+         * @param {string} artistName - The name of the artist.
+         * @returns {Promise<string|null>} The preview URL or null.
+         */
+        async function getDeezerPreview(trackName, artistName) {
+            // Note: Deezer's API is CORS-friendly and doesn't require a key for search.
+            // We must use a proxy, however, as Deezer API itself doesn't send the
+            // required CORS headers for a direct browser fetch.
+            // We will use a simple, public CORS proxy.
+            const proxyUrl = 'https://cors-anywhere.herokuapp.com/'; // A simple public proxy
+            const searchQuery = `artist:"${artistName}" track:"${trackName}"`;
+            const deezerApiUrl = `https://api.deezer.com/search?q=${encodeURIComponent(searchQuery)}&limit=1`;
+
+            try {
+                // We fetch through the proxy
+                const response = await fetch(proxyUrl + deezerApiUrl);
+                if (!response.ok) {
+                    console.warn(`Deezer proxy fetch failed: ${response.status}`);
+                    return null;
+                }
+                const data = await response.json();
+                
+                // Return the preview URL from the first result, if it exists
+                if (data.data && data.data.length > 0) {
+                    return data.data[0].preview || null;
+                }
+                return null;
+            } catch (error) {
+                console.warn(`Error fetching from Deezer: ${error.message}`);
+                return null;
+            }
+        }
+        // --- END NEW ---
+
+        async function getSpotifyData() {
+            const YOUR_BACKEND_TOKEN_URL = 'http://localhost:3000/api/get-spotify-token';
+            let processedData = []; 
+
+            try {
+                // --- Step 1: Get Access Token from our backend ---
+                console.log("Attempting to fetch Spotify token from backend...");
+                const tokenResponse = await fetch(YOUR_BACKEND_TOKEN_URL);
+                if (!tokenResponse.ok) {
+                    throw new Error(`Backend token server responded with ${tokenResponse.status}. (Is server.js running?)`);
+                }
+                const tokenData = await tokenResponse.json();
+                const accessToken = tokenData.access_token;
+                console.log("Successfully fetched token from backend.");
+                
+                // --- Step 2: Fetch data from Spotify API ---
+                console.log("Fetching real data for multiple genres...");
+                
+                for (const genre of genres) {
+                    for (const offset of [0, 50]) {
+                        const searchQuery = `genre:${genre.toLowerCase()}`;
+                        const SPOTIFY_SEARCH_URL = `https://api.spotify.com/v1/search?q=${encodeURIComponent(searchQuery)}&type=track&limit=50&offset=${offset}`;
+
+                        const spotifyResponse = await fetch(SPOTIFY_SEARCH_URL, {
+                            headers: { 'Authorization': `Bearer ${accessToken}` }
+                        });
+
+                        if (!spotifyResponse.ok) {
+                            console.warn(`Spotify API request failed for ${genre} (offset ${offset}): ${spotifyResponse.status}`);
+                            continue; 
+                        }
+                        
+                        const spotifyData = await spotifyResponse.json();
+                        
+                        // --- Step 3: Process Spotify data ---
+                        const tracks = spotifyData.tracks.items.map(track => {
+                            if (!track || !track.album || !track.artists) return null; 
+                            
+                            const assignedGenre = genre; 
+                            const year = new Date(track.album.release_date).getFullYear() || 2000;
+                            const trackName = track.name;
+                            const artistName = track.artists[0].name;
+                            
+                            return {
+                                position: getRandomPointInSphere(SPHERE_RADIUS),
+                                color: genreColors[assignedGenre] || new THREE.Color(0xffffff), 
+                                data: {
+                                    genre: assignedGenre, 
+                                    year: year,
+                                    songs: [`${trackName} by ${artistName}`, `Album: ${track.album.name}`],
+                                    // We'll fetch this from Deezer
+                                    previewUrl: null 
+                                }
+                            };
+                        }).filter(track => track !== null);
+
+                        // --- NEW: Step 4: Fetch Deezer previews for this batch IN PARALLEL ---
+                        const deezerPromises = tracks.map(trackData => {
+                            // Extract artist and track name from "Song by Artist" string
+                            const [trackName, artistName] = trackData.data.songs[0].split(' by ');
+                            return getDeezerPreview(trackName, artistName);
+                        });
+                        
+                        const previewUrls = await Promise.all(deezerPromises);
+                        
+                        // Assign the fetched URLs back to the data
+                        tracks.forEach((trackData, index) => {
+                            trackData.data.previewUrl = previewUrls[index];
+                        });
+                        // --- END NEW ---
+                        
+                        processedData.push(...tracks);
+                    }
+                }
+                
+                console.log(`Successfully fetched ${processedData.length} real tracks from Spotify/Deezer.`);
+                
+                if (processedData.length === 0) {
+                    throw new Error("No tracks were processed.");
+                }
+                return processedData;
+
+            } catch (error) {
+                // --- FALLBACK ---
+                console.warn(`API fetch failed: ${error.message}. Using mock data instead.`);
+                return generateMockData(2000); // Generate 2000 mock particles on failure
+            }
+        }
+        
+        // --- 1b. MOCK DATA GENERATION (Fallback) ---
+        function generateMockData(count) {
+            const data = [];
+            for (let i = 0; i < count; i++) {
+                const genre = genres[Math.floor(Math.random() * genres.length)];
+                const year = 1980 + Math.floor(Math.random() * 45); // 1980 - 2024
+                const songs = [`${genre} Song #${Math.floor(Math.random() * 100)}`, `Album: ${genre} Hits (${year})`];
+                
+                data.push({
+                    position: getRandomPointInSphere(SPHERE_RADIUS),
+                    color: genreColors[genre],
+                    data: { 
+                        genre: genre, 
+                        year: year, 
+                        songs: songs,
+                        previewUrl: null // No previews for mock data
+                    }
+                });
+            }
+            return data;
+        }
+
+        // --- 2. THREE.JS INITIALIZATION ---
+        
+        async function init() {
+            // Scene
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x000000, 0.008); 
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = SPHERE_RADIUS * 2; 
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            container.appendChild(renderer.domElement);
+
+            // Controls
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true; 
+            controls.dampingFactor = 0.05;
+            controls.minDistance = 5; 
+            controls.maxDistance = SPHERE_RADIUS + 30; 
+
+            // --- Initialize Audio Context (for chime) ---
+            try {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            } catch (e) {
+                console.warn("Web Audio API is not supported in this browser.");
+            }
+            
+            // --- NEW: Get Audio Player ---
+            audioPlayer = document.getElementById('song-preview-player');
+            audioPlayer.volume = 0.5; // Set a default volume
+
+            // --- 3. GET DATA & POPULATE FILTERS ---
+            console.log("Loading song data...");
+            mockData = await getSpotifyData(); 
+            console.log(`Data loaded. ${mockData.length} particles will be created.`);
+            
+            genreFilter = document.getElementById('genre-filter');
+            yearFilter = document.getElementById('year-filter');
+            populateFilters();
+
+            // --- 4. CREATE PARTICLES ---
+            console.log("Creating particles...");
+            const geometry = new THREE.BufferGeometry();
+            const positions = [];
+            const colors = [];
+
+            mockData.forEach(item => {
+                positions.push(item.position.x, item.position.y, item.position.z);
+                colors.push(item.color.r, item.color.g, item.color.b);
+            });
+
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+            
+            const softDotTexture = createSoftDotTexture();
+
+            const material = new THREE.PointsMaterial({
+                size: 1.0,
+                map: softDotTexture,
+                vertexColors: true, 
+                transparent: true,
+                blending: THREE.AdditiveBlending, 
+                depthWrite: false 
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+
+            // --- 5. CREATE GLOW AND LINES ---
+            
+            // Create the glow sprite
+            const glowTexture = createGlowTexture();
+            const spriteMaterial = new THREE.SpriteMaterial({
+                map: glowTexture,
+                blending: THREE.AdditiveBlending,
+                transparent: true,
+                opacity: 0.9,
+                depthWrite: false
+            });
+            glowSprite = new THREE.Sprite(spriteMaterial);
+            glowSprite.scale.set(6, 6, 1);
+            glowSprite.visible = false;
+            particles.add(glowSprite); 
+
+            // Create the connection lines object
+            const lineMaterial = new THREE.LineBasicMaterial({
+                color: 0xffff00,
+                transparent: true,
+                opacity: 0.4,
+                depthWrite: false
+            });
+            const lineGeometry = new THREE.BufferGeometry();
+            connectionLines = new THREE.LineSegments(lineGeometry, lineMaterial);
+            particles.add(connectionLines);
+
+
+            // --- 6. EVENT LISTENERS ---
+            window.addEventListener('resize', onWindowResize);
+            container.addEventListener('mousedown', onMouseDown);
+            
+            // --- Custom cursor event listeners ---
+            window.addEventListener('mousemove', (e) => {
+                mouseX = e.clientX;
+                mouseY = e.clientY;
+            });
+            window.addEventListener('mousedown', () => {
+                customCursor.classList.add('clicked');
+                // Resume AudioContext *and* handle audio player unlock
+                if (audioContext && audioContext.state === 'suspended') {
+                    audioContext.resume();
+                }
+                // This "unlocks" the audio player for programmatic playing
+                if (audioPlayer.paused) {
+                    audioPlayer.play().catch(() => {}); // Play and catch error
+                    audioPlayer.pause(); // Immediately pause
+                }
+            });
+            window.addEventListener('mouseup', () => {
+                customCursor.classList.remove('clicked');
+            });
+
+            // --- Hide custom cursor over UI ---
+            [infoPanel, filterBox].forEach(el => {
+                el.addEventListener('mouseenter', () => {
+                    customCursor.style.display = 'none';
+                });
+                el.addEventListener('mouseleave', () => {
+                    customCursor.style.display = 'block';
+                });
+            });
+
+            // --- UI Button Listeners ---
+            closePanelBtn.addEventListener('click', () => {
+                hideInfoPanel();
+                hideGlowAndLines(); 
+            });
+            
+            genreFilter.addEventListener('change', () => {
+                applyFilters();
+                if (selectedParticleIndex !== -1) {
+                    updateConnectionLines(selectedParticleIndex);
+                }
+            });
+            yearFilter.addEventListener('change', () => {
+                applyFilters();
+                if (selectedParticleIndex !== -1) {
+                    updateConnectionLines(selectedParticleIndex);
+                }
+            });
+        }
+
+        // --- 7. ANIMATION LOOP ---
+        function animate() {
+            requestAnimationFrame(animate);
+            if (!particles) return;
+            
+            if (particles) {
+                if (!controls.autoRotate) {
+                    particles.rotation.y += 0.0002;
+                    particles.rotation.x += 0.0001;
+                }
+            }
+
+            controls.update(); 
+            
+            // --- Smooth cursor movement ---
+            cursorX += (mouseX - cursorX) * smoothingFactor;
+            cursorY += (mouseY - cursorY) * smoothingFactor;
+
+            customCursor.style.left = `${cursorX}px`;
+            customCursor.style.top = `${cursorY}px`;
+
+            renderer.render(scene, camera);
+        }
+
+        // --- 8. HELPER FUNCTIONS ---
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function onMouseDown(event) {
+            // Check if click is on UI elements
+            if (infoPanel.contains(event.target) || filterBox.contains(event.target)) {
+                return;
+            }
+
+            event.preventDefault();
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            raycaster.params.Points.threshold = 0.5; 
+
+            // --- Bug fix logic ---
+            const objectsToIntersect = [particles];
+            if (glowSprite.visible) {
+                objectsToIntersect.push(glowSprite);
+            }
+            const intersects = raycaster.intersectObjects(objectsToIntersect);
+
+            if (intersects.length > 0) {
+                if (intersects[0].object === glowSprite) {
+                    return; // Clicked the glow, do nothing
+                }
+                const particleIntersect = intersects.find(hit => hit.object === particles);
+                if (!particleIntersect) {
+                    return;
+                }
+                const index = particleIntersect.index;
+                if (index === selectedParticleIndex) {
+                    return; // Clicked the same particle, do nothing
+                }
+                // --- End bug fix logic ---
+
+                // It's a new particle! Select it.
+                const particleData = mockData[index].data;
+                
+                showInfoPanel(particleData);
+                showGlow(index);
+                updateConnectionLines(index);
+                selectedParticleIndex = index;
+
+                // --- UPDATED: Play sound (preview or chime) ---
+                playSound(particleData);
+
+            } 
+        }
+
+        function showInfoPanel(data) {
+            if (data.songs && data.songs.length > 0) {
+                panelTitle.textContent = data.songs[0];
+            } else {
+                panelTitle.textContent = "Song Cluster";
+            }
+            if (data.songs && data.songs.length > 1) {
+                panelAlbumInfo.textContent = data.songs[1];
+                panelAlbumInfo.style.display = 'block'; 
+            } else {
+                panelAlbumInfo.textContent = ''; 
+                panelAlbumInfo.style.display = 'none'; 
+            }
+            panelGenre.textContent = data.genre;
+            panelYear.textContent = data.year;
+            infoPanel.style.display = 'block';
+        }
+
+        function hideInfoPanel() {
+            infoPanel.style.display = 'none';
+            // NEW: Stop audio when panel closes
+            if (audioPlayer && !audioPlayer.paused) {
+                audioPlayer.pause();
+            }
+        }
+
+        // --- Sound Function (HEAVILY UPDATED) ---
+        /**
+         * Plays the Deezer preview if available, otherwise plays the chime.
+         */
+        async function playSound(data) { 
+            // Stop the chime sound context, just in case
+            if (audioContext && audioContext.state === 'running') {
+                 audioContext.suspend(); // Politely stop any playing chimes
+                 audioContext = new (window.AudioContext || window.webkitAudioContext)(); // Reset
+            }
+            
+            if (data.previewUrl) {
+                // --- Play Preview ---
+                console.log("Playing preview:", data.previewUrl);
+                audioPlayer.src = data.previewUrl;
+                try {
+                    await audioPlayer.play();
+                    console.log("Preview started.");
+                } catch (err) {
+                    console.error("Audio play failed:", err.message);
+                    // Fallback to chime if play fails
+                    playChimeSound(data); 
+                }
+            } else {
+                // --- Play Fallback Chime ---
+                console.log("No preview URL found. Playing chime sound.");
+                playChimeSound(data);
+            }
+        }
+
+        /**
+         * Plays a simple "bell" sound based on the particle's genre.
+         */
+        function playChimeSound(data) { 
+            if (!audioContext) {
+                console.warn("No AudioContext for chime sound.");
+                return;
+            }
+            
+            if (audioContext.state === 'suspended') {
+                audioContext.resume();
+            }
+            
+            const fundamental = genreNotes[data.genre] || 1046.50; 
+            const currentTime = audioContext.currentTime;
+            const duration = 2.5;
+            const fadeInTime = 0.05;
+            const peakVolume = 0.2;
+
+            const mainGain = audioContext.createGain();
+            mainGain.gain.setValueAtTime(0.001, currentTime);
+            mainGain.gain.exponentialRampToValueAtTime(peakVolume, currentTime + fadeInTime);
+            mainGain.gain.exponentialRampToValueAtTime(0.001, currentTime + duration);
+            mainGain.connect(audioContext.destination);
+
+            const partials = [
+                { freq: fundamental * 1,    volume: 1.0 },
+                { freq: fundamental * 2.01, volume: 0.4 },
+                { freq: fundamental * 3.15, volume: 0.2 },
+                { freq: fundamental * 4.25, volume: 0.1 }
+            ];
+
+            partials.forEach((partial) => {
+                const osc = audioContext.createOscillator();
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(partial.freq, currentTime);
+                
+                const partialGain = audioContext.createGain();
+                partialGain.gain.setValueAtTime(partial.volume, currentTime);
+                partialGain.gain.exponentialRampToValueAtTime(0.001, currentTime + duration * 0.9);
+
+                osc.connect(partialGain);
+                partialGain.connect(mainGain);
+                
+                osc.start(currentTime);
+                osc.stop(currentTime + duration); 
+            });
+        }
+
+
+        // --- 9. GLOW AND LINE FUNCTIONS ---
+        function showGlow(index) {
+            const particle = mockData[index];
+            glowSprite.position.copy(particle.position);
+            glowSprite.material.color.copy(particle.color);
+            glowSprite.visible = true;
+        }
+
+        function updateConnectionLines(index) {
+            const selectedParticle = mockData[index];
+            const selectedPosition = selectedParticle.position;
+            const selectedGenre = selectedParticle.data.genre;
+            const selectedYear = selectedParticle.data.year;
+            
+            const linePositions = [];
+            let genreTarget = null;
+            let yearTarget = null;
+            
+            const particleColors = particles.geometry.attributes.color;
+            const FADED_COLOR = new THREE.Color(0x1a1a1a);
+
+            for (let i = 0; i < mockData.length; i++) {
+                if (i === index) continue; 
+                
+                const isVisible = !(
+                    Math.abs(particleColors.getX(i) - FADED_COLOR.r) < 0.01 &&
+                    Math.abs(particleColors.getY(i) - FADED_COLOR.g) < 0.01 &&
+                    Math.abs(particleColors.getZ(i) - FADED_COLOR.b) < 0.01
+                );
+
+                if (isVisible) {
+                    const otherParticle = mockData[i];
+                    
+                    if (!genreTarget && otherParticle.data.genre === selectedGenre) {
+                        genreTarget = otherParticle.position;
+                    }
+                    if (!yearTarget && otherParticle.data.year === selectedYear) {
+                        yearTarget = otherParticle.position;
+                    }
+                    if (genreTarget && yearTarget) {
+                        break;
+                    }
+                }
+            }
+            
+            if (genreTarget) {
+                linePositions.push(selectedPosition.x, selectedPosition.y, selectedPosition.z);
+                linePositions.push(genreTarget.x, genreTarget.y, genreTarget.z);
+            }
+            if (yearTarget) {
+                linePositions.push(selectedPosition.x, selectedPosition.y, selectedPosition.z);
+                linePositions.push(yearTarget.x, yearTarget.y, yearTarget.z);
+            }
+
+            // Update the line geometry
+            connectionLines.geometry.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3));
+            connectionLines.geometry.computeBoundingSphere();
+        }
+
+        function hideGlowAndLines() {
+            glowSprite.visible = false;
+            connectionLines.geometry.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
+            selectedParticleIndex = -1;
+            
+            // NEW: Stop audio when deselected
+            if (audioPlayer && !audioPlayer.paused) {
+                audioPlayer.pause();
+            }
+        }
+
+        // --- 10. FILTER FUNCTIONS ---
+        function populateFilters() {
+            const genreSet = new Set();
+            const yearSet = new Set();
+            mockData.forEach(item => {
+                genreSet.add(item.data.genre);
+                yearSet.add(item.data.year);
+            });
+
+            genreFilter.innerHTML = '<option value="all">All Genres</option>';
+            yearFilter.innerHTML = '<option value="all">All Years</option>';
+            
+            genres.forEach(genre => {
+                if (genreSet.has(genre)) { 
+                    const option = document.createElement('option');
+                    option.value = genre;
+                    option.textContent = genre;
+                    genreFilter.appendChild(option);
+                }
+            });
+
+            const sortedYears = [...yearSet].sort((a, b) => b - a); // Newest first
+            sortedYears.forEach(year => {
+                const option = document.createElement('option');
+                option.value = year;
+                option.textContent = year;
+                yearFilter.appendChild(option);
+            });
+        }
+
+        function applyFilters() {
+            if (!particles) return; 
+
+            const selectedGenre = genreFilter.value;
+            const selectedYear = yearFilter.value;
+
+            const colors = particles.geometry.attributes.color;
+            const FADED_COLOR = new THREE.Color(0x1a1a1a); 
+
+            for (let i = 0; i < mockData.length; i++) {
+                const particle = mockData[i];
+                const genreMatch = (selectedGenre === 'all') || (particle.data.genre === selectedGenre);
+                const yearMatch = (selectedYear === 'all') || (particle.data.year.toString() === selectedYear);
+
+                if (genreMatch && yearMatch) {
+                    colors.setXYZ(i, particle.color.r, particle.color.g, particle.color.b);
+                } else {
+                    colors.setXYZ(i, FADED_COLOR.r, FADED_COLOR.g, FADED_COLOR.b);
+                }
+            }
+            colors.needsUpdate = true;
+            
+            if (selectedParticleIndex !== -1) {
+                const particle = mockData[selectedParticleIndex];
+                const genreMatch = (selectedGenre === 'all') || (particle.data.genre === selectedGenre);
+                const yearMatch = (selectedYear === 'all') || (particle.data.year.toString() === selectedYear);
+                
+                if (!(genreMatch && yearMatch)) {
+                    hideInfoPanel();
+                    hideGlowAndLines();
+                }
+            }
+        }
+
+        // --- 11. TEXTURE CREATION HELPER ---
+        function createSoftDotTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 64;
+            canvas.height = 64;
+            const context = canvas.getContext('2d');
+            const gradient = context.createRadialGradient(32, 32, 0, 32, 32, 32);
+            gradient.addColorStop(0, 'rgba(255,255,255,1)');
+            gradient.addColorStop(0.2, 'rgba(255,255,255,0.8)');
+            gradient.addColorStop(1, 'rgba(255,255,255,0)');
+            context.fillStyle = gradient;
+            context.fillRect(0, 0, 64, 64);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        function createGlowTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 128;
+            canvas.height = 128;
+            const context = canvas.getContext('2d');
+            const gradient = context.createRadialGradient(64, 64, 0, 64, 64, 64);
+            gradient.addColorStop(0, 'rgba(255, 255, 255, 1)');
+            gradient.addColorStop(0.2, 'rgba(255, 255, 255, 0.8)');
+            gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
+            context.fillStyle = gradient;
+            context.fillRect(0, 0, 128, 128);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        // --- START ---
+        init();
+        animate();
+
+    </script>
+</body>
+</html>
